@@ -442,35 +442,86 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
         // This method is called to analyze a dependency and return its details.
         // It should be called when a new dependency is added to the pom.xml file.
         String basePath = project.getBasePath();
-        String outputDir = ".license-tool";
+        // Ensure we write all SBOMs into the top-level project .license-tool directory
+        String outputDir = Paths.get(basePath, ".license-tool").toString();
         if (basePath == null) {
             Messages.showErrorDialog(project, "Project base path is not set.", "Dependency Analysis Error");
             LOG.error("Project base path is not set.");
+            System.out.println("Project base path is not set.");
             return new File[] {null, null};
         }
-        Path newSbomPath = Paths.get(basePath, "/.license-tool/bom.xml");
-        File newSbomFile = newSbomPath.toFile();
-        Path prevSbomPath = Paths.get(basePath, "/.license-tool/bom-prev.xml");
-        File prevSbomFile = prevSbomPath.toFile();
-        try{
-            System.out.println("sbomFile: " + newSbomFile.getAbsolutePath());
-            LOG.info("Generating SBOM for project at path: {}", basePath);
-            System.out.println("prevSbomFile: " + prevSbomFile.getAbsolutePath());
-            LOG.info("Previous SBOM path: {}", prevSbomFile.getAbsolutePath());
-            System.out.println("sbomFile.exists(): " + newSbomFile.exists());
-            LOG.info("Previous SBOM exists: {}", newSbomFile.exists());
-            // Backup current SBOM before regenerating
+
+        // Find a pom.xml under the project directory (recursively). If the project is a multi-module
+        // repository the pom may live in a subdirectory; try to locate it so CycloneDx can run there.
+        java.nio.file.Path projectRoot = Paths.get(basePath);
+        Path moduleDir = null;
+        try {
+            try (java.util.stream.Stream<Path> walk = java.nio.file.Files.walk(projectRoot)) {
+                moduleDir = walk.filter(p -> p.getFileName().toString().equals("pom.xml"))
+                        .map(Path::getParent)
+                        .findFirst()
+                        .orElse(null);
+            }
+        } catch (IOException ioEx) {
+            LOG.warn("Error while searching for pom.xml under project root {}", basePath, ioEx);
+            System.out.println("Error while searching for pom.xml under project root " + basePath + ": " + ioEx.getMessage());
+        }
+
+        if (moduleDir == null) {
+            String msg = "No pom.xml found under project directory: " + basePath + ". Please open a Maven module or add a pom.xml.";
+            Messages.showErrorDialog(project, msg, "Dependency Analysis Error");
+            LOG.error(msg);
+            System.out.println(msg);
+            return new File[] {null, null};
+        }
+
+        File newSbomFile = null;
+        File prevSbomFile = null;
+        try {
+            LOG.info("Generating SBOM for module at path: {}", moduleDir.toAbsolutePath());
+            System.out.println("Generating SBOM for module at path: " + moduleDir.toAbsolutePath());
+
+            // Determine project-level .license-tool paths (top-level directory)
+            Path topLicenseTool = Paths.get(basePath, ".license-tool");
+            Path newSbomPath = topLicenseTool.resolve("bom.xml");
+            Path prevSbomPath = topLicenseTool.resolve("bom-prev.xml");
+            newSbomFile = newSbomPath.toFile();
+            prevSbomFile = prevSbomPath.toFile();
+
+            // If a module-level SBOM exists from previous runs, migrate it into the top-level directory
+            Path moduleLevelSbom = moduleDir.resolve(".license-tool").resolve("bom.xml");
+            if (!Files.exists(newSbomPath) && Files.exists(moduleLevelSbom)) {
+                try {
+                    Files.createDirectories(topLicenseTool);
+                    Files.copy(moduleLevelSbom, newSbomPath, StandardCopyOption.REPLACE_EXISTING);
+                    LOG.info("Migrated module-level SBOM {} to top-level {}", moduleLevelSbom.toAbsolutePath(), newSbomPath.toAbsolutePath());
+                } catch (IOException migEx) {
+                    LOG.warn("Failed to migrate module-level SBOM: {}", migEx.getMessage());
+                }
+            }
+
             if (newSbomFile.exists()) {
+                // ensure previous copy exists as a backup
+                Files.createDirectories(prevSbomPath.getParent());
                 Files.copy(newSbomFile.toPath(), prevSbomFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 System.out.println("Previous SBOM backed up to: " + prevSbomFile.getAbsolutePath());
                 LOG.info("Previous SBOM backed up to: {}", prevSbomFile.getAbsolutePath());
             } else {
-                System.out.println("No previous SBOM found.");
-                LOG.info("No previous SBOM found.");
-                prevSbomFile = null; // No previous SBOM to compare against
+                LOG.info("No previous SBOM found for module {}", moduleDir.toAbsolutePath());
+                System.out.println("No previous SBOM found for module " + moduleDir.toAbsolutePath());
+                prevSbomFile = null;
             }
-            // Generate new SBOM
-            newSbomFile = CycloneDxMavenInvoker.INSTANCE.generateSbom(new File(basePath), outputDir);
+
+            // Generate new SBOM for the module directory but write output to the top-level .license-tool
+            File generated = CycloneDxMavenInvoker.INSTANCE.generateSbom(moduleDir.toFile(), outputDir);
+            if (generated == null) {
+                String msg = "Failed to generate SBOM for module: " + moduleDir.toAbsolutePath();
+                Messages.showErrorDialog(project, msg, "Dependency Analysis Error");
+                LOG.error(msg);
+                System.out.println(msg);
+                return new File[] {null, null};
+            }
+            newSbomFile = generated;
             System.out.println("New SBOM generated to: " + newSbomFile.getAbsolutePath());
             LOG.info("New SBOM generated to: {}", newSbomFile.getAbsolutePath());
 
@@ -482,19 +533,24 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
                 if (vf != null) {
                     VfsUtil.markDirtyAndRefresh(false, true, true, vf);
                     System.out.println("VFS refreshed for: " + vf.getPath());
+                    LOG.info("VFS refreshed for: {}", vf.getPath());
                 } else {
                     VirtualFileManager.getInstance().asyncRefresh(null);
                     System.out.println("VFS async refresh triggered");
+                    LOG.info("VFS async refresh triggered");
                 }
             } catch (Exception e) {
                 System.out.println("Error refreshing VFS: " + e.getMessage());
                 LOG.error("Error refreshing VFS: {}", e.getMessage());
             }
-        }catch (Exception e){
-            System.out.println( "Error analyzing dependencies: " + e.getMessage() + "Dependency Analysis Error");
-            LOG.error("Error analyzing dependencies: {}", e.getMessage());
+        } catch (Exception e) {
+            String err = "Error analyzing dependencies: " + e.getMessage();
+            System.out.println(err);
+            LOG.error("{}", err, e);
+            Messages.showErrorDialog(project, err, "Dependency Analysis Error");
             return new File[] {null, null};
         }
+
         return new File[] {prevSbomFile, newSbomFile};
     }
 
