@@ -1,6 +1,8 @@
 package com.example.my_plugin.license
 
 import com.example.my_plugin.MyToolWindowBridge
+import com.example.my_plugin.ApiKeysDialog
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
@@ -318,6 +320,35 @@ class LicenseQuestionnaireDialog(private val project: Project) : DialogWrapper(p
             setErrorText("Project name is required.")
             return
         }
+        // if the model selcted is gpt-4, ensure api key is set before saving
+        try {
+            val selectedModel = MyToolWindowBridge.getInstance(project).ui?.selectedModelProp?.get()
+            if (selectedModel != null && selectedModel.contains("gpt")) {
+                // Check stored OpenAI API key in project properties or on-disk file
+                val props = PropertiesComponent.getInstance(project)
+                //val openAiKey = props.getValue("license_tool.openai_api_key", "")
+                val keyFile = project.basePath?.let { java.io.File(it, ".license-tool/openai_key.txt") }
+                val hasKeyOnDisk = keyFile?.exists() == true && keyFile.readText(Charsets.UTF_8).isNotBlank()
+
+                if (!hasKeyOnDisk) {
+                    // Prompt user to enter API key via the API Keys dialog
+                    val apiDlg = ApiKeysDialog(project)
+                    apiDlg.show()
+
+                    // Re-check after dialog
+                    val newKey = props.getValue("license_tool.openai_api_key", "")
+                    val newHasKeyOnDisk = keyFile?.exists() == true && keyFile.readText(Charsets.UTF_8).isNotBlank()
+                    if (newKey.isBlank() && !newHasKeyOnDisk) {
+                        setErrorText("OpenAI API key is required for the selected model ($selectedModel). Please configure it in the 'API Key' dialog.")
+                        return
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            // Non-fatal: allow save but log error to console for diagnostics
+            t.printStackTrace()
+        }
+
         saveToJson()
         super.doOKAction()
     }
