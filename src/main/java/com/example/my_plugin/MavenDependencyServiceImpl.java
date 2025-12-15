@@ -328,7 +328,7 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
 
         ChatbotSessionLlamaPython conflictChatbot = new ChatbotSessionLlamaPython( //TODO split up classes for different models
                 "localhost",
-                "gpt-4o-mini", //TODO ideally we can configure this around the user's settings
+                "gpt-4o", //TODO ideally we can configure this around the user's settings
                 systemPrompt);
 
         for (Map.Entry<License, String> entry : potentialConflicts.entrySet())
@@ -402,7 +402,7 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
 
         ChatbotSessionLlamaPython categorizationChatbot = new ChatbotSessionLlamaPython( //TODO split up classes for different models
                 "localhost",
-                "gpt-4o-mini", //TODO ideally we can configure this around the user's settings
+                "gpt-4o", //TODO ideally we can configure this around the user's settings
                 systemPrompt);
 
         ArrayList<Map<License, String>> categorizedConflicts = new ArrayList<>();

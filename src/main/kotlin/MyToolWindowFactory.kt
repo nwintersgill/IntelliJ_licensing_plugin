@@ -44,7 +44,7 @@ class MyToolWindowFactory : ToolWindowFactory {
         var submitButton: JButton? = null
         private var loadingTimer: Timer? = null
         private val propertyGraph = PropertyGraph()
-        val selectedModelProp = propertyGraph.property("gpt-4o-mini")
+        val selectedModelProp = propertyGraph.property("gpt-4o")
 
         // Add a reference to the Java listener so we can unregister it on dispose
         private var surveyListener: LicenseQuestionnaireListener? = null
