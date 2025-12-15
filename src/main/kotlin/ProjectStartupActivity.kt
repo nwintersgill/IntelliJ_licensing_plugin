@@ -33,21 +33,18 @@ class ProjectStartupActivity : ProjectActivity {
         println("Starting project activity for: ${project.name}")
         project.getService(PythonServerService::class.java).ensureStarted()
 
-        // Access the bridge service; the UI may not be created yet by the ToolWindowFactory,
-        // so avoid forcing a non-null and handle the null case gracefully.
-        val bridge = project.getService(MyToolWindowBridge::class.java)
-        val toolWindow = bridge?.ui
-        if (toolWindow == null) {
-            LOG.warn("Tool window UI not yet initialized for project {}", project.name)
-        }
+        val toolWindow = project.getService(MyToolWindowBridge::class.java).ui
+
+        // val toolWindow = MyToolWindowBridge.getInstance(project).ui
+        checkNotNull(toolWindow)
 
         LOG.info("Project opened: {}", project.name)
          // Check if the license survey file exists
-         val licenseFile = surveyFile(project)
+         val licenseFile = java.io.File(project.basePath, ".license-tool/license-survey.json")
          if (licenseFile.exists()) {
             LOG.info("License survey file exists at: {}", licenseFile.absolutePath)
-            toolWindow?.enableSubmitButton()
-            toolWindow?.enableInputArea()
+             toolWindow.enableSubmitButton()
+             toolWindow.enableInputArea()
          } else {
             LOG.info("License survey file does not exist.")
              // Create the .license-tool folder if it does not exists
@@ -57,12 +54,10 @@ class ProjectStartupActivity : ProjectActivity {
                  ApplicationManager.getApplication().invokeLater {
                      // All UI must be on EDT
                      LOG.debug("Project opened (invokeLater): {}", project.name)
-                     LOG.debug("toolWindow (bridge.ui): {}", bridge?.ui)
-                     bridge?.ui?.let { ui ->
-                         if (!ui.isToolWindowVisible(project)) {
-                             ui.toggleToolWindowVisibility(project)
-                         }
-                     }
+                     LOG.debug("toolWindow: {}", toolWindow)
+                     if (!toolWindow.isToolWindowVisible(project)) {
+                         toolWindow.toggleToolWindowVisibility(project)
+                      }
                      // showQuestionnaireEdt(project, toolWindow)
                      showQuestionnaireEdt(project)
                  }
@@ -140,8 +135,8 @@ class ProjectStartupActivity : ProjectActivity {
         val dialog = LicenseQuestionnaireDialog(project)
         dialog.show() // modal: returns when closed
 
-        // After closing, check if the JSON has been created using the safe helper
-        val created = surveyFile(project).exists()
+        // After closing, check if the JSON has been created
+        val created = java.io.File(project.basePath, ".license-tool/license-survey.json").exists()
         if (created) {
             LOG.info("License survey created. Submit button enabled in the tool window.")
             // toolWindow?.enableSubmitButton()

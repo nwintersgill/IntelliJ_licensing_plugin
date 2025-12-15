@@ -8,21 +8,15 @@ object CycloneDxMavenInvoker {
     fun generateSbom(mavenProjectDir: File, outputDir: String): File {
         require(File(mavenProjectDir, "pom.xml").exists()) { "pom.xml not found in ${mavenProjectDir.absolutePath}" }
 
-        // Resolve output directory: if an absolute path is provided, use it directly (this lets callers
-        // request the top-level project .license-tool directory); otherwise treat it as relative to the
-        // maven project directory (legacy behavior).
-        val outputDirFile = File(outputDir)
-        val resolvedOutputDir = if (outputDirFile.isAbsolute) outputDirFile else File(mavenProjectDir, outputDir)
-
         val mvnCmd = getMvnCmd(mavenProjectDir)
 
         val process = ProcessBuilder(
             mvnCmd,
             "org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom",
             "-DoutputFormat=xml",
-            "-DoutputDirectory=" + resolvedOutputDir.absolutePath,
+            "-DoutputDirectory=" + outputDir,
             "-DoutputName=bom",
-            "-DincludeBomSerialNumber=false"
+            "-DincludeBomSerialNumber=false",
         )
             .directory(mavenProjectDir)
             .redirectErrorStream(true)
@@ -34,24 +28,28 @@ object CycloneDxMavenInvoker {
         val exitCode = process.waitFor()
 
         if (exitCode != 0) {
-            // collect output for diagnostics
-            val outText = output.readText()
-            LOG.error("Maven SBOM generation failed with exit code $exitCode; output=\n$outText")
-            throw RuntimeException("Error during the generation of the SBOM:\n$outText")
-        } else {
-            // inspect output to see if plugin reported a different BOM path
+            LOG.error("Maven SBOM generation failed with exit code $exitCode")
+            throw RuntimeException("Error during the generation of the SBOM:\n$output")
+        }else {
+            // wait for process to finish and capture output line by line
             output.useLines { lines ->
                 lines.forEach { line ->
+                    // intercept BOM path
                     if (line.contains("CycloneDX: Writing and validating BOM (XML):")) {
                         val detected = line.substringAfter("CycloneDX: Writing and validating BOM (XML):").trim()
                         bomFilePath = detected
-                        if (!bomFilePath.split("/").last().equals("bom.xml")) {
-                            LOG.info("Unexpected BOM file name reported by plugin: $bomFilePath")
-                            val desiredPath = File(resolvedOutputDir, "bom.xml").absolutePath
-                            if (renameFile(bomFilePath, desiredPath)) {
-                                LOG.info("Renamed generated BOM to: $desiredPath")
-                            } else {
-                                LOG.warn("Failed to rename generated BOM ($bomFilePath) to $desiredPath")
+                        // split by "/" and get last element to ensure it's "bom.xml"
+                        if (bomFilePath.split("/").last() != "bom.xml") {
+                            println("Unexpected BOM file name: $bomFilePath")
+                            LOG.info("Unexpected BOM file name: $bomFilePath")
+                            val newSbomFilePath = "$mavenProjectDir/$outputDir/bom.xml"
+                            // rename to bom.xml
+                            if(renameFile(bomFilePath, newSbomFilePath)) {
+                                println("Renamed to bom.xml")
+                                LOG.info("Renamed to $newSbomFilePath")
+                            }else {
+                                println("[ERROR] Failed to rename BOM file to bom.xml")
+                                LOG.error("Failed to rename BOM file to bom.xml")
                             }
                         }
                     }
@@ -59,9 +57,9 @@ object CycloneDxMavenInvoker {
             }
         }
 
-        val bomFile = File(resolvedOutputDir, "bom.xml")
+        val bomFile = File(mavenProjectDir, outputDir + "/bom.xml")
         if (!bomFile.exists()) {
-            LOG.warn("bom.xml not found after the generation; reportedPath=$bomFilePath")
+            LOG.warn("bom.xml not found after the generation: $bomFilePath")
             throw RuntimeException("SBOM not found after generation.")
 
         }
