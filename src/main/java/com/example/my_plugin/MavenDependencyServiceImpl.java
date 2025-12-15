@@ -5,9 +5,11 @@ import chatbot.ChatbotSessionLlamaPython;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 
 import com.intellij.openapi.ui.Messages;
+import java.nio.charset.StandardCharsets;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -49,11 +51,11 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
     }
 
     @Override
-    public void flagNewDependency() {
+    public void flagNewDependency(String pomPath) {
         // This method is called when a new dependency is added to the pom.xml file.
         LOG.info("New dependency detected, starting analysis pipeline.");
         // return the depJson object to the controller
-        JsonObject depJson = getChanges();
+        JsonObject depJson = getChanges(pomPath);
         if(!depJson.isEmpty()) {
             System.out.println("flagNewDependency - licenseChange called");
             // write the depJson object to file for debugging purposes
@@ -122,17 +124,20 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
         }
     }
 
-    public JsonObject getChanges() {
+    public JsonObject getChanges(String pomPath) {
         // This method is called when a pom.xml file is added, modified, or removed.
         // It should analyze the dependencies and generate a new SBOM.
         System.out.println("getChanges - diffSbom called");
         LOG.info("Analyzing dependency changes via SBOM diff.");
-        File[] sbomFiles = genSbom();
+        File[] sbomFiles = genSbom(pomPath);
         File prevSbom = sbomFiles[0];
         File currSbom = sbomFiles[1];
         if (currSbom == null) {
-            // If the current SBOM generation fails, show an error message and return null.
-            Messages.showErrorDialog(project, "Failed to generate SBOM files.", "Dependency Analysis Error");
+            // If the current SBOM generation fails, show an error message on the EDT and return null.
+            final String errMsg = "Failed to generate SBOM files.";
+            //ApplicationManager.getApplication().invokeLater(() -> {
+                //if (!project.isDisposed()) Messages.showErrorDialog(project, errMsg, "Dependency Analysis Error");
+            //});
             LOG.error("Failed to generate SBOM files. Current SBOM is null.");
             return new JsonObject(); // Return an empty JSON object if no changes are detected.
         } else if (prevSbom != null) {
@@ -161,9 +166,12 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
                     return diffResults;
                 }
             } catch (Exception e) {
-                System.out.println("Error analyzing dependencies: " + e.getMessage());
-                LOG.error("Error analyzing dependencies: " + e.getMessage());
-                Messages.showErrorDialog(project, "Error analyzing dependencies: " + e.getMessage(), "Dependency Analysis Error");
+                final String err = "Error analyzing dependencies: " + e.getMessage();
+                System.out.println(err);
+                LOG.error(err);
+/*                ApplicationManager.getApplication().invokeLater(() -> {
+                    if (!project.isDisposed()) Messages.showErrorDialog(project, err, "Dependency Analysis Error");
+                });*/
                 return new JsonObject(); // Return an empty JSON object if analysis fails.
             }
         } else {
@@ -438,13 +446,16 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
         return categorizedConflicts;
     }
 
-    public File[] genSbom() {
+    public File[] genSbom(String pomPath) {
         // This method is called to analyze a dependency and return its details.
         // It should be called when a new dependency is added to the pom.xml file.
         String basePath = project.getBasePath();
         String outputDir = ".license-tool";
         if (basePath == null) {
-            Messages.showErrorDialog(project, "Project base path is not set.", "Dependency Analysis Error");
+            final String msg = "Project base path is not set.";
+            /*ApplicationManager.getApplication().invokeLater(() -> {
+                if (!project.isDisposed()) Messages.showErrorDialog(project, msg, "Dependency Analysis Error");
+            });*/
             LOG.error("Project base path is not set.");
             return new File[] {null, null};
         }
@@ -470,7 +481,7 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
                 prevSbomFile = null; // No previous SBOM to compare against
             }
             // Generate new SBOM
-            newSbomFile = CycloneDxMavenInvoker.INSTANCE.generateSbom(new File(basePath), outputDir);
+            newSbomFile = CycloneDxMavenInvoker.INSTANCE.generateSbom(new File(basePath), outputDir, new File(pomPath));
             System.out.println("New SBOM generated to: " + newSbomFile.getAbsolutePath());
             LOG.info("New SBOM generated to: {}", newSbomFile.getAbsolutePath());
 
@@ -491,7 +502,8 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
                 LOG.error("Error refreshing VFS: {}", e.getMessage());
             }
         }catch (Exception e){
-            System.out.println( "Error analyzing dependencies: " + e.getMessage() + "Dependency Analysis Error");
+            System.out.println( "Error analyzing dependencies: " + e.getMessage() + " Dependency Analysis Error");
+            System.out.println("Stack trace: " + Arrays.toString(e.getStackTrace()));
             LOG.error("Error analyzing dependencies: {}", e.getMessage());
             return new File[] {null, null};
         }

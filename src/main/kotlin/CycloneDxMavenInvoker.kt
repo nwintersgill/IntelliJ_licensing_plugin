@@ -5,22 +5,27 @@ import java.io.File
 object CycloneDxMavenInvoker {
     private val LOG = LogInitializer.getLogger(CycloneDxMavenInvoker::class.java)
 
-    fun generateSbom(mavenProjectDir: File, outputDir: String): File {
-        require(File(mavenProjectDir, "pom.xml").exists()) { "pom.xml not found in ${mavenProjectDir.absolutePath}" }
+    fun generateSbom(mavenProjectDir: File, outputDir: String, pomPath: File): File {
+        //require(File(mavenProjectDir, "pom.xml").exists()) { "pom.xml not found in ${mavenProjectDir.absolutePath}" }
 
         val mvnCmd = getMvnCmd(mavenProjectDir)
-
+        // make a copy of the pomPath file into the mavenProjectDir
+        val pomDir = File(pomPath.parent)
         val process = ProcessBuilder(
             mvnCmd,
             "org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom",
             "-DoutputFormat=xml",
-            "-DoutputDirectory=" + outputDir,
+            "-DoutputDirectory=$mavenProjectDir/$outputDir",
             "-DoutputName=bom",
             "-DincludeBomSerialNumber=false",
         )
-            .directory(mavenProjectDir)
+            //.directory(mavenProjectDir)
+            .directory(pomDir)
             .redirectErrorStream(true)
             .start()
+
+        // print the output for debugging
+
 
         val output = process.inputStream.bufferedReader()
         var bomFilePath: String? = null
@@ -29,6 +34,7 @@ object CycloneDxMavenInvoker {
 
         if (exitCode != 0) {
             LOG.error("Maven SBOM generation failed with exit code $exitCode")
+            LOG.error("Error during the generation of the SBOM:\n$output")
             throw RuntimeException("Error during the generation of the SBOM:\n$output")
         }else {
             // wait for process to finish and capture output line by line

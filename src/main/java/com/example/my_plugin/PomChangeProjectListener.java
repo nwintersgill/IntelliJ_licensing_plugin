@@ -39,7 +39,7 @@ public class PomChangeProjectListener extends PsiTreeChangeAdapter implements Bu
                     // LicensingController controller = new LicensingController();
                     System.out.println("Start the pipeline for dependency addition");
                     LogInitializer.getLogger(PomChangeProjectListener.class).info("Start the pipeline for dependency addition for project: {}", project.getName());
-                    licensingController.onDependencyChange(project);
+                    licensingController.onDependencyChange(project, path);
                 }
             }
         });

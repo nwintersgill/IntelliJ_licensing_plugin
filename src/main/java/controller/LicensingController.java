@@ -260,7 +260,7 @@ public final class LicensingController implements Disposable {
     //---------------------------------------------------------------------
     // Tool API Interface Functions
     //---------------------------------------------------------------------
-    public void onDependencyChange(Project project)
+    public void onDependencyChange(Project project, String pomPath)
     {
         System.out.println("addDependency LicensingController");
         MyToolWindowFactory.ChatUi ui = MyToolWindowBridge.Companion.getInstance(project).getUi();
@@ -276,7 +276,7 @@ public final class LicensingController implements Disposable {
             try {
                 MavenDependencyServiceImpl mavenService = new MavenDependencyServiceImpl(project);
                 System.out.println("addDependency - flagNewDependency called");
-                mavenService.flagNewDependency();
+                mavenService.flagNewDependency(pomPath);
             } catch (Exception e) {
                 e.printStackTrace();
                 LOGGER.error("Error in onDependencyChange: {}", e.getMessage());

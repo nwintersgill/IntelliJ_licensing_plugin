@@ -33,9 +33,16 @@ class ProjectStartupActivity : ProjectActivity {
         println("Starting project activity for: ${project.name}")
         project.getService(PythonServerService::class.java).ensureStarted()
 
-        val toolWindow = project.getService(MyToolWindowBridge::class.java).ui
+        // Access the bridge service; the UI may not be created yet by the ToolWindowFactory,
+        // so avoid forcing a non-null and handle the null case gracefully.
+        val bridge = project.getService(MyToolWindowBridge::class.java)
+        val toolWindow = bridge?.ui
+        if (toolWindow == null) {
+            LOG.warn("Tool window UI not yet initialized for project {}", project.name)
+        }
 
         // val toolWindow = MyToolWindowBridge.getInstance(project).ui
+        //wait for toolwindow to be initialized
         checkNotNull(toolWindow)
 
         LOG.info("Project opened: {}", project.name)
@@ -43,8 +50,8 @@ class ProjectStartupActivity : ProjectActivity {
          val licenseFile = java.io.File(project.basePath, ".license-tool/license-survey.json")
          if (licenseFile.exists()) {
             LOG.info("License survey file exists at: {}", licenseFile.absolutePath)
-             toolWindow.enableSubmitButton()
-             toolWindow.enableInputArea()
+             toolWindow?.enableSubmitButton()
+             toolWindow?.enableInputArea()
          } else {
             LOG.info("License survey file does not exist.")
              // Create the .license-tool folder if it does not exists
@@ -54,10 +61,12 @@ class ProjectStartupActivity : ProjectActivity {
                  ApplicationManager.getApplication().invokeLater {
                      // All UI must be on EDT
                      LOG.debug("Project opened (invokeLater): {}", project.name)
-                     LOG.debug("toolWindow: {}", toolWindow)
-                     if (!toolWindow.isToolWindowVisible(project)) {
-                         toolWindow.toggleToolWindowVisibility(project)
-                      }
+                     LOG.debug("toolWindow (bridge.ui): {}", bridge?.ui)
+                     bridge?.ui?.let { ui ->
+                         if (!ui.isToolWindowVisible(project)) {
+                             ui.toggleToolWindowVisibility(project)
+                         }
+                     }
                      // showQuestionnaireEdt(project, toolWindow)
                      showQuestionnaireEdt(project)
                  }
@@ -70,7 +79,9 @@ class ProjectStartupActivity : ProjectActivity {
             if (base != null) {
                 val baseDir = File(base)
                 val hasPom = baseDir.walkTopDown().any { it.name == "pom.xml" }
+                System.out.println("Hasp pom.xml: $hasPom")
                 if (hasPom) {
+                    val pomPath = baseDir.walkTopDown().firstOrNull { it.name == "pom.xml" }?.absolutePath ?: "N/A"
                     val sbomFile = File(base, ".license-tool/bom.xml")
                     if (!sbomFile.exists()) {
                         // run SBOM generation off the EDT
@@ -78,8 +89,8 @@ class ProjectStartupActivity : ProjectActivity {
                             try {
                                 val svc = project.getService(MavenDependencyService::class.java)
                                 if (svc != null) {
-                                    LOG.info("Triggering SBOM generation on project open for: {}", project.name)
-                                    svc.genSbom()
+                                    LOG.info("Triggering SBOM generation on project open for: {} (found pom: {})", project.name, pomPath)
+                                    svc.genSbom(pomPath)
                                 } else {
                                     LOG.warn("MavenDependencyService not available on project: {}", project.name)
                                 }
