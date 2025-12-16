@@ -324,7 +324,7 @@ class MyToolWindowFactory : ToolWindowFactory {
                         submitButton?.isEnabled = false
                     }
                     row {
-                        val modelItems = listOf("llama3.2:latest", "gpt-4o", "gpt-4o-mini")
+                        val modelItems = listOf("gpt-4o")
                         comboBox(modelItems).bindItem(selectedModelProp).align(AlignX.RIGHT)
                         button("API Key") {
                             val apiDialog = com.example.my_plugin.ApiKeysDialog(project)
