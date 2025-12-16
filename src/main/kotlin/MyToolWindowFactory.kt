@@ -326,7 +326,7 @@ class MyToolWindowFactory : ToolWindowFactory {
                     row {
                         val modelItems = listOf("gpt-4o")
                         comboBox(modelItems).bindItem(selectedModelProp).align(AlignX.RIGHT)
-                        button("API Keys") {
+                        button("API Key") {
                             val apiDialog = com.example.my_plugin.ApiKeysDialog(project)
                             apiDialog.show()
                         }

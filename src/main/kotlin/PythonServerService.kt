@@ -48,7 +48,7 @@ class PythonServerService(private val project: Project) : Disposable {
         val existingPyPath = System.getenv("PYTHONPATH") ?: ""
         val newPyPath = if (existingPyPath.isBlank()) tempDir.toString() else existingPyPath + java.io.File.pathSeparator + tempDir
         val projectDir = project.basePath ?: ""
-        val selectedModel = toolWindow?.selectedModelProp?.get() ?: "llama3.2:latest"
+        val selectedModel = toolWindow?.selectedModelProp?.get() ?: "gpt-4o"
         println("Selected model: $selectedModel")
         val cmd = GeneralCommandLine(pythonExe(), script.toString())
             .withWorkDirectory(tempDir.toFile())
