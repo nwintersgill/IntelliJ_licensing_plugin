@@ -5,74 +5,132 @@ import java.io.File
 object CycloneDxMavenInvoker {
     private val LOG = LogInitializer.getLogger(CycloneDxMavenInvoker::class.java)
 
+    /**
+     * Synchronous helper retained for compatibility. Delegates to [generateSbomAsync] and blocks with a timeout.
+     * Must not be called on EDT.
+     */
     fun generateSbom(mavenProjectDir: File, outputDir: String, pomPath: File): File {
-        //require(File(mavenProjectDir, "pom.xml").exists()) { "pom.xml not found in ${mavenProjectDir.absolutePath}" }
+        val app = com.intellij.openapi.application.ApplicationManager.getApplication()
+        if (app.isDispatchThread) {
+            throw IllegalStateException("generateSbom must not be called on the EDT. Run it from a background thread or Task.Backgroundable.")
+        }
 
+        // Delegate to async path but block with a reasonable timeout to avoid indefinite hangs.
+        val future = generateSbomAsync(mavenProjectDir, outputDir, pomPath)
+        return try {
+            // 15 minutes should be more than enough for a single Maven invocation; callers can use async variant to avoid blocking.
+            future.get(15, java.util.concurrent.TimeUnit.MINUTES)
+        } catch (te: java.util.concurrent.TimeoutException) {
+            future.cancel(true)
+            throw RuntimeException("Timed out while generating SBOM (15 minutes).", te)
+        }
+    }
+
+    /**
+     * Asynchronous, non-blocking SBOM generation using IntelliJ Execution API.
+     * Returns a CompletableFuture that completes with the generated BOM File or completes exceptionally on failure.
+     * Caller should call .cancel(true) to abort; cancellation will attempt to destroy the spawned process.
+     */
+    fun generateSbomAsync(mavenProjectDir: File, outputDir: String, pomPath: File): java.util.concurrent.CompletableFuture<File> {
         val mvnCmd = getMvnCmd(mavenProjectDir)
-        // make a copy of the pomPath file into the mavenProjectDir
         val pomDir = File(pomPath.parent)
-        val process = ProcessBuilder(
-            mvnCmd,
-            "org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom",
-            "-DoutputFormat=xml",
-            "-DoutputDirectory=$mavenProjectDir/$outputDir",
-            "-DoutputName=bom",
-            "-DincludeBomSerialNumber=false",
-        )
-            //.directory(mavenProjectDir)
-            .directory(pomDir)
-            .redirectErrorStream(true)
-            .start()
 
-        // print the output for debugging
+        val cmd = com.intellij.execution.configurations.GeneralCommandLine()
+            .withExePath(mvnCmd)
+            .withWorkDirectory(mavenProjectDir)
+            .withParameters(
+                "org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom",
+                "-f", pomPath.absolutePath,
+                "-DoutputFormat=xml",
+                "-DoutputDirectory=${File(mavenProjectDir, outputDir).absolutePath}",
+                "-DoutputName=bom",
+                "-DincludeBomSerialNumber=false",
+                "-B"
+            )
 
+        LOG.info("Starting async mvn command: ${cmd.commandLineString} in ${pomDir.absolutePath}")
 
-        val output = process.inputStream.bufferedReader()
-        var bomFilePath: String? = null
+        val processHandler = com.intellij.execution.process.OSProcessHandler(cmd)
+        val future = java.util.concurrent.CompletableFuture<File>()
+        val outputBuilder = StringBuilder()
 
-        val exitCode = process.waitFor()
+        processHandler.addProcessListener(object : com.intellij.execution.process.ProcessAdapter() {
+            override fun onTextAvailable(event: com.intellij.execution.process.ProcessEvent, outputType: com.intellij.openapi.util.Key<*>) {
+                // Keep this lightweight: avoid heavy string operations per-line in high-throughput cases.
+                outputBuilder.append(event.text)
+            }
 
-        if (exitCode != 0) {
-            LOG.error("Maven SBOM generation failed with exit code $exitCode")
-            LOG.error("Error during the generation of the SBOM:\n$output")
-            throw RuntimeException("Error during the generation of the SBOM:\n$output")
-        }else {
-            // wait for process to finish and capture output line by line
-            output.useLines { lines ->
-                lines.forEach { line ->
-                    // intercept BOM path
-                    if (line.contains("CycloneDX: Writing and validating BOM (XML):")) {
-                        val detected = line.substringAfter("CycloneDX: Writing and validating BOM (XML):").trim()
-                        bomFilePath = detected
-                        // split by "/" and get last element to ensure it's "bom.xml"
-                        if (bomFilePath.split("/").last() != "bom.xml") {
-                            println("Unexpected BOM file name: $bomFilePath")
-                            LOG.info("Unexpected BOM file name: $bomFilePath")
-                            val newSbomFilePath = "$mavenProjectDir/$outputDir/bom.xml"
-                            // rename to bom.xml
-                            if(renameFile(bomFilePath, newSbomFilePath)) {
-                                println("Renamed to bom.xml")
-                                LOG.info("Renamed to $newSbomFilePath")
-                            }else {
-                                println("[ERROR] Failed to rename BOM file to bom.xml")
-                                LOG.error("Failed to rename BOM file to bom.xml")
+            override fun processTerminated(event: com.intellij.execution.process.ProcessEvent) {
+                try {
+                    val exitCode = event.exitCode
+                    val fullOutput = outputBuilder.toString()
+
+                    if (exitCode != 0) {
+                        LOG.error("Maven SBOM generation failed with exit code $exitCode")
+                        LOG.debug(fullOutput)
+                        future.completeExceptionally(RuntimeException("Error during SBOM generation. Exit code: $exitCode\n$fullOutput"))
+                        return
+                    }
+
+                    // parse output for BOM path. The cyclonedx plugin prints the final path; if not found, fallback to expected location
+                    var bomFilePath: String? = null
+                    fullOutput.lineSequence().forEach { line ->
+                        if (line.contains("CycloneDX: Writing and validating BOM (XML):")) {
+                            val detected = line.substringAfter("CycloneDX: Writing and validating BOM (XML):").trim()
+                            if (detected.isNotEmpty()) {
+                                bomFilePath = detected
                             }
                         }
                     }
+
+                    val bomFile = File(mavenProjectDir, outputDir + "/bom.xml")
+
+                    if (bomFilePath != null && bomFilePath.trim().isNotEmpty()) {
+                        val detectedFile = File(bomFilePath)
+                        if (detectedFile.exists()) {
+                            if (!detectedFile.absolutePath.equals(bomFile.absolutePath)) {
+                                if (renameFile(detectedFile.absolutePath, bomFile.absolutePath)) {
+                                    LOG.info("Renamed detected BOM to expected location: ${bomFile.absolutePath}")
+                                } else {
+                                    LOG.warn("Detected BOM exists at ${detectedFile.absolutePath} but failed to move to ${bomFile.absolutePath}")
+                                }
+                            }
+                        }
+                    }
+
+                    if (!bomFile.exists()) {
+                        LOG.warn("bom.xml not found after the generation. Output logged for debugging.")
+                        LOG.debug(fullOutput)
+                        future.completeExceptionally(RuntimeException("SBOM not found after generation. See logs for details."))
+                        return
+                    }
+
+                    LOG.info("✅ SBOM generated: ${bomFile.absolutePath}")
+                    future.complete(bomFile)
+                } catch (t: Throwable) {
+                    future.completeExceptionally(t)
+                }
+            }
+        })
+
+        // Wire cancellation: if caller cancels the CompletableFuture, try to destroy the process.
+        future.whenComplete { _, _ ->
+            if (future.isCancelled) {
+                try {
+                    if (!processHandler.process.isAlive) return@whenComplete
+                } catch (_: Throwable) {}
+                try {
+                    LOG.info("Cancellation requested - destroying Maven process")
+                    processHandler.destroyProcess()
+                } catch (t: Throwable) {
+                    LOG.warn("Failed to destroy process on cancel: ${t.message}")
                 }
             }
         }
 
-        val bomFile = File(mavenProjectDir, outputDir + "/bom.xml")
-        if (!bomFile.exists()) {
-            LOG.warn("bom.xml not found after the generation: $bomFilePath")
-            throw RuntimeException("SBOM not found after generation.")
-
-        }
-
-        println("✅ SBOM generated: ${bomFile.absolutePath}")
-        LOG.info("✅ SBOM generated: ${bomFile.absolutePath}")
-        return bomFile
+        // Start the process after listeners are attached
+        processHandler.startNotify()
+        return future
     }
 
     fun getMvnCmd(mavenProjectDir: File) : String
@@ -118,7 +176,7 @@ object CycloneDxMavenInvoker {
     fun renameFile(oldPath: String, newPath: String): Boolean {
         return try {
             // if oldPath does not exist, return false
-            val oldFile = java.io.File(oldPath)
+            val oldFile = File(oldPath)
             if (!oldFile.exists()) {
                 println("renameFile error: source file does not exist: $oldPath")
                 LOG.error("renameFile error: source file does not exist: $oldPath")

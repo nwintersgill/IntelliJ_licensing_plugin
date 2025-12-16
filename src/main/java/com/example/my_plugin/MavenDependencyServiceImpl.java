@@ -51,71 +51,92 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
     }
 
     @Override
-    public void flagNewDependency(String pomPath) {
-        // This method is called when a new dependency is added to the pom.xml file.
-        LOG.info("New dependency detected, starting analysis pipeline.");
-        // return the depJson object to the controller
-        JsonObject depJson = getChanges(pomPath);
-        if(!depJson.isEmpty()) {
-            System.out.println("flagNewDependency - licenseChange called");
-            // write the depJson object to file for debugging purposes
-            try {
-                writeJsonToFile(depJson, project.getBasePath() + "/.license-tool/dependency-diff.json");
-            } catch (IOException e) {
-                System.out.println("Error writing JSON to file: " + e.getMessage());
-            }
+    public void flagNewDependency(final String pomPath) {
+        // Schedule the heavy dependency analysis in a background task to avoid freezing the EDT.
+        LOG.info("New dependency detected, scheduling analysis pipeline.");
 
-            MyToolWindowFactory.ChatUi toolWindow = MyToolWindowBridge.Companion.getInstance(project).getUi();
-            if (toolWindow != null) {
-                // toolWindow.appendToChatHistory("A change in your project dependencies is found!\n\n");
-                // Open the tool window if it is not already open
-                if (!toolWindow.isToolWindowVisible(project)) {
-                    toolWindow.toggleToolWindowVisibility(project);
-                }
+        com.intellij.openapi.progress.ProgressManager.getInstance().run(new com.intellij.openapi.progress.Task.Backgroundable(project, "Dependency analysis", true) {
+            @Override
+            public void run(@org.jetbrains.annotations.NotNull com.intellij.openapi.progress.ProgressIndicator indicator) {
+                try {
+                    JsonObject depJson = getChanges(pomPath);
+                    if (depJson.isEmpty()) {
+                        LOG.info("No dependency changes found or no SBOM generated.");
+                        return;
+                    }
 
-                // Get the changes that are potentially problematic/cause conflicts
+                    System.out.println("flagNewDependency - licenseChange called");
 
-                //Get the license of our software
-
-                License myLicense = this.project.getService(LicensingController.class).getTargetLicense(); //gives "unknown" if config not found
-
-                ArrayList<Map<License, String>> conflicts = getConflicts(myLicense, depJson);
-
-                // Submit the information to the chatbot
-                //toolWindow.submitMessage("In my project these dependencies has been removed or added :\n"
-                //        + conflicts.toString() + "\n It would be great if you could analyze it and provide me with the information about the licenses of these dependencies and based on this give me a suggestion on how i can redistribute my project.\n");
-                if (!conflicts.get(0).isEmpty() || !conflicts.get(1).isEmpty() || !conflicts.get(2).isEmpty()) //only submit the message if a conflict is detected
-                {
-                    //Read in the prompt template to be used for supplying the model with information about the change
-                    String inputPromptTemplate;
+                    // write the depJson object to file for debugging purposes
                     try {
-                        InputStream is = LicensingController.class.getClassLoader().getResourceAsStream("prompts/change-report-template.txt");
-                        inputPromptTemplate = IOUtils.toString(is, "UTF-8");
-                    }
-                    catch (Exception e)
-                    {
-                        //Unable to load input prompt template
-                        inputPromptTemplate = "My software project is licensed under {myLicense}" +
-                                ". The following libraries have been added or removed: {libraries}" +
-                                "I have determined that the following software licenses may cause conflicts in my project, and identified reasons for these conflicts, which you should be able to resolve: {addressableIssues}" +
-                                "; These conflicts require analysis by a lawyer: {lawyerIssues}; And these are unknown: {unknownIssues}. Please present this information back to me and provide me with a summary of any licensing " +
-                                "conflicts caused by this change, and provide suggestions on how to remedy them where appropriate. Use this licensing information about my repository as context: {licensingQuestionnaire}";
+                        writeJsonToFile(depJson, project.getBasePath() + "/.license-tool/dependency-diff.json");
+                    } catch (IOException e) {
+                        System.out.println("Error writing JSON to file: " + e.getMessage());
                     }
 
-                    String inputPrompt = inputPromptTemplate.replace("{myLicense}", myLicense.getType())
-                            .replace("{libraries}", depJson.toString())
-                            .replace("{addressableIssues}", conflicts.get(0).toString())
-                            .replace("{lawyerIssues}", conflicts.get(1).toString())
-                            .replace("{unknownIssues}", conflicts.get(2).toString())
-                            .replace("{licensingQuestionnaire}", this.project.getService(LicensingController.class).getUserLicenseConfig().toString());
+                    // Compute conflicts (non-UI work)
+                    License myLicense = MavenDependencyServiceImpl.this.project.getService(LicensingController.class).getTargetLicense();
+                    ArrayList<Map<License, String>> conflicts = getConflicts(myLicense, depJson);
 
-                    toolWindow.submitMessage(inputPrompt);
+                    // Only prepare a prompt if there are conflicts
+                    if (!conflicts.get(0).isEmpty() || !conflicts.get(1).isEmpty() || !conflicts.get(2).isEmpty()) {
+                        String inputPromptTemplate;
+                        try (InputStream is = LicensingController.class.getClassLoader().getResourceAsStream("prompts/change-report-template.txt")) {
+                            if (is != null) {
+                                inputPromptTemplate = IOUtils.toString(is, StandardCharsets.UTF_8);
+                            } else {
+                                inputPromptTemplate = null;
+                            }
+                        } catch (Exception e) {
+                            inputPromptTemplate = null;
+                        }
+
+                        if (inputPromptTemplate == null) {
+                            inputPromptTemplate = "My software project is licensed under {myLicense}" +
+                                    ". The following libraries have been added or removed: {libraries}" +
+                                    "I have determined that the following software licenses may cause conflicts in my project, and identified reasons for these conflicts, which you should be able to resolve: {addressableIssues}" +
+                                    "; These conflicts require analysis by a lawyer: {lawyerIssues}; And these are unknown: {unknownIssues}. Please present this information back to me and provide me with a summary of any licensing " +
+                                    "conflicts caused by this change, and provide suggestions on how to remedy them where appropriate. Use this licensing information about my repository as context: {licensingQuestionnaire}";
+                        }
+
+                        String inputPrompt = inputPromptTemplate.replace("{myLicense}", myLicense.getType())
+                                .replace("{libraries}", depJson.toString())
+                                .replace("{addressableIssues}", conflicts.get(0).toString())
+                                .replace("{lawyerIssues}", conflicts.get(1).toString())
+                                .replace("{unknownIssues}", conflicts.get(2).toString())
+                                .replace("{licensingQuestionnaire}", MavenDependencyServiceImpl.this.project.getService(LicensingController.class).getUserLicenseConfig().toString());
+                        LOG.info("Input prompt for chatbot: {}", inputPrompt);
+
+                        // Schedule UI work on EDT: toggle visibility and submit message
+                        final String promptToSend = inputPrompt;
+                        ApplicationManager.getApplication().invokeLater(() -> {
+                            try {
+                                MyToolWindowFactory.ChatUi ui = MyToolWindowBridge.Companion.getInstance(project).getUi();
+                                if (ui != null) {
+                                    if (!ui.isToolWindowVisible(project)) {
+                                        ui.toggleToolWindowVisibility(project);
+                                    }
+                                    try {
+                                        ui.submitMessage(promptToSend);
+                                    } catch (Exception e) {
+                                        LOG.error("Failed to submit message to tool window: {}", e.getMessage());
+                                    }
+                                } else {
+                                    LOG.warn("Tool window UI not ready - skipping immediate submit; message content: {}", promptToSend);
+                                }
+                            } catch (Exception e) {
+                                LOG.error("Error scheduling UI updates: {}", e.getMessage(), e);
+                            }
+                        });
+                    }
+
+                    System.out.println("flagNewDependency - engageChatbot called");
+
+                } catch (Exception e) {
+                    LOG.error("Error in dependency analysis task: {}", e.getMessage(), e);
                 }
             }
-
-            System.out.println("flagNewDependency - engageChatbot called");
-        }
-
+        });
     }
 
     public static void writeJsonToFile(JsonObject jsonObject, String filePath) throws IOException {
@@ -302,6 +323,7 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
      */
     public Map<License, String> deriveConflictReasons(License ownLicense, Map<License, String> potentialConflicts)
     {
+
         Set<String> checkedLicenses = new HashSet<>();
         Map<License, String> conflicts = new HashMap<>();
 
@@ -357,6 +379,7 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
                         case "Check dependency":
                         case "?":
                             String inputPrompt = inputPromptTemplate.replace("{myLicense}", ownLicense.getType()).replace("{otherLicense}", entry.getKey().getType());
+                            LOG.info("Input prompt for chatbot: {}", inputPrompt);
                             reason = conflictChatbot.submitPrompt(inputPrompt);
                             conflicts.put(entry.getKey(), reason);
                             break;
@@ -423,6 +446,7 @@ public final class MavenDependencyServiceImpl implements MavenDependencyService,
         {
             try {
                 String inputPrompt = inputPromptTemplate.replace("{myLicense}", ownLicense.getType()).replace("{otherLicense}", entry.getKey().getType()).replace("{reason}", entry.getValue());
+                LOG.info("Input prompt for chatbot: {}", inputPrompt);
                 String cat = categorizationChatbot.submitPrompt(inputPrompt);
                 if (cat.equals("A")) {
                     fixableConflicts.put(entry.getKey(), entry.getValue());

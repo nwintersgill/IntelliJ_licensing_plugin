@@ -9,6 +9,7 @@ import com.example.my_plugin.MavenDependencyServiceImpl;
 import com.example.my_plugin.MyToolWindowBridge;
 import com.example.my_plugin.MyToolWindowFactory;
 import com.example.my_plugin.PythonServerService;
+import com.example.my_plugin.ProcessOrchestrator;
 import com.intellij.openapi.application.ApplicationManager;
 import org.apache.commons.io.IOUtils;
 import org.json.JSONArray;
@@ -271,18 +272,46 @@ public final class LicensingController implements Disposable {
         }
         // Start animation on EDT
         ui.startSbomAnimation();
-        // Do heavy work in background
+        // Do heavy work in background using ProcessOrchestrator
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             try {
-                MavenDependencyServiceImpl mavenService = new MavenDependencyServiceImpl(project);
-                System.out.println("addDependency - flagNewDependency called");
-                mavenService.flagNewDependency(pomPath);
+                // Use project service to serialize and debounce SBOM generation
+                ProcessOrchestrator orchestrator = project.getService(ProcessOrchestrator.class);
+                if (orchestrator != null) {
+                    try {
+                        orchestrator.generateSbomQueued(pomPath).whenComplete((file, ex) -> {
+                            // Stop animation on EDT and log results
+                            ApplicationManager.getApplication().invokeLater(() -> {
+                                ui.stopAnimation();
+                                if (ex != null) {
+                                    LOGGER.error("SBOM generation failed: {}", ex.getMessage());
+                                } else {
+                                    LOGGER.info("SBOM generation completed: {}", file.getAbsolutePath());
+                                }
+                            });
+                        });
+                    } catch (Exception e) {
+                        LOGGER.error("Error scheduling SBOM generation: {}", e.getMessage(), e);
+                        ApplicationManager.getApplication().invokeLater(() -> ui.stopAnimation());
+                    }
+                } else {
+                    // Fallback: use existing Maven service if orchestrator isn't available
+                    try {
+                        MavenDependencyServiceImpl mavenService = new MavenDependencyServiceImpl(project);
+                        System.out.println("addDependency - flagNewDependency called");
+                        mavenService.flagNewDependency(pomPath);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        LOGGER.error("Error in onDependencyChange fallback: {}", e.getMessage());
+                    } finally {
+                        System.out.println("closing animation");
+                        ApplicationManager.getApplication().invokeLater(() -> ui.stopAnimation());
+                    }
+                }
             } catch (Exception e) {
                 e.printStackTrace();
                 LOGGER.error("Error in onDependencyChange: {}", e.getMessage());
-            } finally {
-                System.out.println("closing animation");
-                ui.stopAnimation();
+                ApplicationManager.getApplication().invokeLater(() -> ui.stopAnimation());
             }
         });
     }

@@ -31,7 +31,15 @@ class ProjectStartupActivity : ProjectActivity {
         LOG.info("Starting project activity for: {}", project.name)
         // start the python server
         println("Starting project activity for: ${project.name}")
-        project.getService(PythonServerService::class.java).ensureStarted()
+
+        // Start the python server off the EDT to avoid blocking IDE startup. It will be lazy and safe.
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                project.getService(PythonServerService::class.java).ensureStarted()
+            } catch (t: Throwable) {
+                LOG.error("Failed to start Python server in background", t)
+            }
+        }
 
         // Access the bridge service; the UI may not be created yet by the ToolWindowFactory,
         // so avoid forcing a non-null and handle the null case gracefully.
@@ -43,7 +51,7 @@ class ProjectStartupActivity : ProjectActivity {
 
         // val toolWindow = MyToolWindowBridge.getInstance(project).ui
         //wait for toolwindow to be initialized
-        checkNotNull(toolWindow)
+        //checkNotNull(toolWindow)
 
         LOG.info("Project opened: {}", project.name)
          // Check if the license survey file exists

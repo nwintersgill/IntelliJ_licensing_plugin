@@ -134,6 +134,7 @@ class ApiKeysDialog(private val project: Project) : DialogWrapper(project, true)
         super.doOKAction()
     }
 
+/*
     override fun doCancelAction() {
         props.setValue(KEY_OPENAI, "")
         // delete the openai_key.txt file if it exists
@@ -181,4 +182,5 @@ class ApiKeysDialog(private val project: Project) : DialogWrapper(project, true)
 
         super.doCancelAction()
     }
+*/
 }

@@ -18,18 +18,20 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import com.intellij.ide.util.PropertiesComponent
+import java.util.concurrent.CompletableFuture
+
+import com.intellij.util.io.BaseOutputReader
 
 
 @Service(Service.Level.PROJECT)
 class PythonServerService(private val project: Project) : Disposable {
 
     private val log = Logger.getInstance(PythonServerService::class.java)
-    // get instance of WindowFactory to access selected model
-    // val toolWindow = MyToolWindowFactory.getInstance(project)
-    val toolWindow = MyToolWindowBridge.getInstance(project).ui
 
     @Volatile private var handler: OSProcessHandler? = null
     @Volatile private var tempRuntimeDir: Path? = null
+    @Volatile private var starting: Boolean = false
 
     @Synchronized
     fun ensureStarted() {
@@ -37,52 +39,88 @@ class PythonServerService(private val project: Project) : Disposable {
             log.info("Python server already running")
             return
         }
+        if (starting) {
+            log.info("Python server start already in progress")
+            return
+        }
+        starting = true
 
         val script = resolveScriptPath()
         makeExecutableIfUnix(script)
 
         val tempDir = tempRuntimeDir ?: script.parent
-        installDependencies(tempDir)
+
+        // Get selected model safely from persistent storage; avoid touching UI components from background threads
+        val selectedModel = PropertiesComponent.getInstance(project).getValue("license.tool.selectedModel", "gpt-4o")
 
         // Set up PYTHONPATH to import modules installed with --target and local modules
         val existingPyPath = System.getenv("PYTHONPATH") ?: ""
         val newPyPath = if (existingPyPath.isBlank()) tempDir.toString() else existingPyPath + java.io.File.pathSeparator + tempDir
         val projectDir = project.basePath ?: ""
-        val selectedModel = toolWindow?.selectedModelProp?.get() ?: "gpt-4o"
-        println("Selected model: $selectedModel")
-        val cmd = GeneralCommandLine(pythonExe(), script.toString())
-            .withWorkDirectory(tempDir.toFile())
-            .withCharset(StandardCharsets.UTF_8)
-            .withEnvironment(mapOf(
-                "PYTHONUNBUFFERED" to "1",
-                "PYTHONPATH" to newPyPath,
-                "LICENSE_TOOL_PROJECT" to projectDir,
-                "LICENSE_TOOL_MODEL" to selectedModel
-            ))
         System.setProperty("py_serverPath", newPyPath)
-        println("Python path: $newPyPath")
 
-        val h = OSProcessHandler(cmd)
-        h.addProcessListener(object : ProcessAdapter() {
-            override fun startNotified(event: ProcessEvent) {
-                println("Python server started: ${cmd.commandLineString}")
-                log.info("Python server started: ${cmd.commandLineString}")
-            }
-            override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
-                // Read/print output
-                val line = event.text?.trimEnd() ?: ""
-                log.info("[py][$outputType] $line")
-                println("[py][$outputType] $line")
-            }
-            override fun processTerminated(event: ProcessEvent) {
-                log.info("Python server terminated with exit code ${event.exitCode}")
-                println("Python server terminated with exit code ${event.exitCode}")
-            }
-        })
-        h.startNotify()
+        // Install dependencies asynchronously; only start the server if install succeeds
+        val installFuture: CompletableFuture<Boolean> = installDependencies(tempDir)
 
-        handler = h
-        Disposer.register(project, this) // turns off the server at project closure
+        installFuture.whenComplete { success, err ->
+            try {
+                if (err != null) {
+                    log.warn("pip install threw an exception, aborting python server start", err)
+                    return@whenComplete
+                }
+
+                if (success != true) {
+                    log.warn("pip install failed; not starting python server. See logs for pip output.")
+                    return@whenComplete
+                }
+
+                // Start the Python server after dependencies install completes successfully
+                val cmd = GeneralCommandLine(pythonExe(), script.toString())
+                    .withWorkDirectory(tempDir.toFile())
+                    .withCharset(StandardCharsets.UTF_8)
+                    .withEnvironment(mapOf(
+                        "PYTHONUNBUFFERED" to "1",
+                        "PYTHONPATH" to newPyPath,
+                        "LICENSE_TOOL_PROJECT" to projectDir,
+                        "LICENSE_TOOL_MODEL" to selectedModel
+                    ))
+
+                log.info("Starting Python server: ${cmd.commandLineString} in ${tempDir}")
+
+                // Use a specialized handler for mostly-silent daemon processes to reduce CPU usage
+                val h = object : OSProcessHandler(cmd) {
+                    override fun readerOptions(): BaseOutputReader.Options {
+                        return BaseOutputReader.Options.forMostlySilentProcess()
+                    }
+                }
+                h.addProcessListener(object : ProcessAdapter() {
+                    override fun startNotified(event: ProcessEvent) {
+                        println("Python server started: ${cmd.commandLineString}")
+                        log.info("Python server started: ${cmd.commandLineString}")
+                    }
+                    override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
+                        // Read/print output
+                        val line = event.text?.trimEnd() ?: ""
+                        log.info("[py][$outputType] $line")
+                        println("[py][$outputType] $line")
+                    }
+                    override fun processTerminated(event: ProcessEvent) {
+                        log.info("Python server terminated with exit code ${event.exitCode}")
+                        println("Python server terminated with exit code ${event.exitCode}")
+                    }
+                })
+
+                h.startNotify()
+
+                handler = h
+                // register disposal with project-level disposer; alternative parents are possible but project is acceptable here
+                Disposer.register(project, this)
+            } catch (t: Throwable) {
+                log.error("Failed to start python server after install: ${t.message}", t)
+            } finally {
+                starting = false
+            }
+        }
     }
 
     override fun dispose() {
@@ -144,10 +182,18 @@ class PythonServerService(private val project: Project) : Disposable {
         }
     }
 
-    private fun installDependencies(tempDir: Path) {
-        // Install Python dependencies locally in the temp directory using pip --target
+    /**
+     * Install Python dependencies and complete the returned future with true on success or false on failure.
+     * The process is started asynchronously and the future completes when the pip process terminates.
+     */
+    private fun installDependencies(tempDir: Path): CompletableFuture<Boolean> {
+        val future = CompletableFuture<Boolean>()
         val req = tempDir.resolve("requirements.txt")
-        if (!Files.exists(req)) return
+        if (!Files.exists(req)) {
+            // nothing to install -> success
+            future.complete(true)
+            return future
+        }
 
         println("Installing Python dependencies from ${req.toAbsolutePath()}")
         val cmd = GeneralCommandLine(listOf(
@@ -168,13 +214,24 @@ class PythonServerService(private val project: Project) : Disposable {
                 println("[pip][$outputType] $line")
                 log.info("[pip][$outputType] $line")
             }
+
+            override fun processTerminated(event: ProcessEvent) {
+                try {
+                    if (event.exitCode != 0) {
+                        log.warn("pip install failed (exit=${event.exitCode}). Runtime may miss packages.")
+                        future.complete(false)
+                    } else {
+                        log.info("pip install completed successfully")
+                        future.complete(true)
+                    }
+                } catch (t: Throwable) {
+                    future.completeExceptionally(t)
+                }
+            }
         })
+        // Start asynchronously and do not block the calling thread
         proc.startNotify()
-        // best-effort: wait for pip to complete (max ~60s)
-        val waited = proc.waitFor(60_000)
-        if (!waited || proc.exitCode != 0) {
-            log.warn("pip install failed or timed out (exit=${proc.exitCode}). Continuing; runtime may miss packages.")
-        }
+        return future
     }
 
 }
