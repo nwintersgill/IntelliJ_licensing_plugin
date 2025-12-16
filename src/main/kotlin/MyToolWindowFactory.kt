@@ -44,7 +44,7 @@ class MyToolWindowFactory : ToolWindowFactory {
         var submitButton: JButton? = null
         private var loadingTimer: Timer? = null
         private val propertyGraph = PropertyGraph()
-        val selectedModelProp = propertyGraph.property("gpt-4o-mini")
+        val selectedModelProp = propertyGraph.property("gpt-4o")
 
         // Add a reference to the Java listener so we can unregister it on dispose
         private var surveyListener: LicenseQuestionnaireListener? = null
@@ -324,7 +324,7 @@ class MyToolWindowFactory : ToolWindowFactory {
                         submitButton?.isEnabled = false
                     }
                     row {
-                        val modelItems = listOf("llama3.2:latest", "gpt-4o", "gpt-4o-mini")
+                        val modelItems = listOf("gpt-4o")
                         comboBox(modelItems).bindItem(selectedModelProp).align(AlignX.RIGHT)
                         button("API Keys") {
                             val apiDialog = com.example.my_plugin.ApiKeysDialog(project)
